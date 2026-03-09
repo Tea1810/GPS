@@ -1,689 +1,466 @@
-﻿// =============================================================================
-//  OpenGL Beginner Scene – "World in a Cube"
-//  Course: Graphics Processing Systems
-//
-//  Requirements:
-//    - GLFW3       (window + input)
-//    - GLAD        (function loader)  – generated for OpenGL 3.3 core
-//    - GLM         (mathematics)
-//    - A C++17 compiler
-//
-//  What this project does:
-//    1. Draws a large skybox cube around the whole scene
-//       (sky-blue top, mountain-silhouette sides, horizon gradient)
-//    2. Draws a textured ground plane (grass-green checkerboard)
-//    3. Draws a simple terrain area made of a grid of quads
-//       with height variation (hills)
-//    4. Basic camera – use W/A/S/D to move, mouse to look around
-// =============================================================================
-
-#include <glad/glad.h>
-#include <GLFW/glfw3.h>
-
-#include <glm/glm.hpp>
-#include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtc/type_ptr.hpp>
-
-#include <iostream>
-#include <vector>
+﻿#include <GL/freeglut.h>
 #include <cmath>
-#include <string>
+#include <vector>
+
+static int windowWidth = 1280;
+static int windowHeight = 720;
+
+static float camX = 0.0f;
+static float camY = 2.0f;
+static float camZ = 10.0f;
+static float camYaw = 180.0f; // horizontal angle (degrees)
+static float camPitch = -10.0f;  // vertical angle (degrees)
+
+static GLuint texGrass = 0;
+static GLuint texSky = 0;
+static GLuint texMountain = 0;
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  WINDOW SETTINGS
+//  TERRAIN DATA  (generated once, stored as a grid of heights)
 // ─────────────────────────────────────────────────────────────────────────────
-const unsigned int SCR_WIDTH = 1280;
-const unsigned int SCR_HEIGHT = 720;
-const char* WINDOW_TITLE = "OpenGL Scene – World in a Cube";
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  CAMERA (simple first-person)
-// ─────────────────────────────────────────────────────────────────────────────
-glm::vec3 cameraPos = glm::vec3(0.0f, 2.5f, 8.0f);
-glm::vec3 cameraFront = glm::vec3(0.0f, 0.0f, -1.0f);
-glm::vec3 cameraUp = glm::vec3(0.0f, 1.0f, 0.0f);
-
-float yaw = -90.0f;  // horizontal angle
-float pitch = -10.0f; // vertical angle (slight downward tilt)
-float fov = 60.0f;
-
-float lastX = SCR_WIDTH / 2.0f;
-float lastY = SCR_HEIGHT / 2.0f;
-bool  firstMouse = true;
-
-float deltaTime = 0.0f;
-float lastFrame = 0.0f;
+static const int GRID = 30;         // 30×30 quads
+static const float CELL = 0.5f;     // world size of each cell
+static float terrainH[GRID + 1][GRID + 1]; // height at each grid point
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  FORWARD DECLARATIONS
 // ─────────────────────────────────────────────────────────────────────────────
-void framebuffer_size_callback(GLFWwindow* window, int width, int height);
-void mouse_callback(GLFWwindow* window, double xpos, double ypos);
-void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
-void processInput(GLFWwindow* window);
+void display();
+void reshape(int w, int h);
+void keyboard(unsigned char key, int x, int y);
+void specialKeys(int key, int x, int y);
+void idle();
 
-unsigned int compileShader(const char* vertSrc, const char* fragSrc);
-unsigned int createProceduralTexture_Grass(int w, int h);
-unsigned int createProceduralTexture_Sky(int w, int h);
-unsigned int createProceduralTexture_Mountain(int w, int h);
+GLuint makeTexture_Grass(int w, int h);
+GLuint makeTexture_Sky(int w, int h);
+GLuint makeTexture_Mountain(int w, int h);
 
-void buildSkyboxMesh(unsigned int& VAO, unsigned int& VBO, int& vertCount);
-void buildGroundMesh(unsigned int& VAO, unsigned int& VBO, unsigned int& EBO,
-    int& indexCount);
-void buildTerrainMesh(unsigned int& VAO, unsigned int& VBO, unsigned int& EBO,
-    int& indexCount, int gridX, int gridZ);
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  GLSL SHADERS  (vertex + fragment bundled as raw strings)
-// ─────────────────────────────────────────────────────────────────────────────
-
-// -- Textured shader (used for ground + skybox walls) -------------------------
-const char* texVertSrc = R"(
-#version 330 core
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec2 aTexCoord;
-
-uniform mat4 model;
-uniform mat4 view;
-uniform mat4 projection;
-
-out vec2 TexCoord;
-
-void main()
-{
-    gl_Position = projection * view * model * vec4(aPos, 1.0);
-    TexCoord = aTexCoord;
-}
-)";
-
-const char* texFragSrc = R"(
-#version 330 core
-in  vec2 TexCoord;
-out vec4 FragColor;
-
-uniform sampler2D ourTexture;
-uniform vec4      colorTint;   // multiply color (use vec4(1) for no tint)
-
-void main()
-{
-    FragColor = texture(ourTexture, TexCoord) * colorTint;
-}
-)";
-
-// -- Terrain shader (vertex-colored height map) --------------------------------
-const char* terrainVertSrc = R"(
-#version 330 core
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aColor;
-
-uniform mat4 model;
-uniform mat4 view;
-uniform mat4 projection;
-
-out vec3 vertColor;
-
-void main()
-{
-    gl_Position = projection * view * model * vec4(aPos, 1.0);
-    vertColor = aColor;
-}
-)";
-
-const char* terrainFragSrc = R"(
-#version 330 core
-in  vec3 vertColor;
-out vec4 FragColor;
-
-void main()
-{
-    FragColor = vec4(vertColor, 1.0);
-}
-)";
+void drawSkybox();
+void drawGround();
+void drawTerrain();
 
 // =============================================================================
 //  MAIN
 // =============================================================================
-int main()
+int main(int argc, char** argv)
 {
-    // ── Init GLFW ─────────────────────────────────────────────────────────────
-    glfwInit();
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-#ifdef __APPLE__
-    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
-#endif
+    // ── freeGLUT init (same as Course 1 example) ──────────────────────────────
+    glutInit(&argc, argv);
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
+    glutInitWindowSize(windowWidth, windowHeight);
+    glutInitWindowPosition(100, 100);
+    glutCreateWindow("OpenGL Scene – World in a Cube");
 
-    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT,
-        WINDOW_TITLE, nullptr, nullptr);
-    if (!window) {
-        std::cerr << "Failed to create GLFW window\n";
-        glfwTerminate();
-        return -1;
-    }
-    glfwMakeContextCurrent(window);
-    glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
-    glfwSetCursorPosCallback(window, mouse_callback);
-    glfwSetScrollCallback(window, scroll_callback);
-    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED); // capture mouse
+    // ── Callbacks ─────────────────────────────────────────────────────────────
+    glutDisplayFunc(display);
+    glutReshapeFunc(reshape);
+    glutKeyboardFunc(keyboard);
+    glutSpecialFunc(specialKeys);
+    glutIdleFunc(idle);
 
-    // ── Load GLAD ─────────────────────────────────────────────────────────────
-    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
-        std::cerr << "Failed to initialize GLAD\n";
-        return -1;
-    }
-
+    // ── OpenGL state ──────────────────────────────────────────────────────────
     glEnable(GL_DEPTH_TEST);
-
-    // ── Compile shaders ───────────────────────────────────────────────────────
-    unsigned int texShader = compileShader(texVertSrc, texFragSrc);
-    unsigned int terrainShader = compileShader(terrainVertSrc, terrainFragSrc);
+    glEnable(GL_TEXTURE_2D);
+    glClearColor(0.12f, 0.39f, 0.78f, 1.0f); // deep sky blue fallback
 
     // ── Generate procedural textures ──────────────────────────────────────────
-    unsigned int grassTex = createProceduralTexture_Grass(256, 256);
-    unsigned int skyTex = createProceduralTexture_Sky(512, 256);
-    unsigned int mountainTex = createProceduralTexture_Mountain(512, 256);
+    texGrass = makeTexture_Grass(256, 256);
+    texSky = makeTexture_Sky(512, 256);
+    texMountain = makeTexture_Mountain(512, 256);
 
-    // ── Build meshes ──────────────────────────────────────────────────────────
-    // Skybox
-    unsigned int skyVAO, skyVBO;
-    int skyVertCount;
-    buildSkyboxMesh(skyVAO, skyVBO, skyVertCount);
-
-    // Ground plane
-    unsigned int groundVAO, groundVBO, groundEBO;
-    int groundIndexCount;
-    buildGroundMesh(groundVAO, groundVBO, groundEBO, groundIndexCount);
-
-    // Terrain grid  (30 x 30 quads)
-    unsigned int terrainVAO, terrainVBO, terrainEBO;
-    int terrainIndexCount;
-    buildTerrainMesh(terrainVAO, terrainVBO, terrainEBO, terrainIndexCount,
-        30, 30);
-
-    // ── Render loop ───────────────────────────────────────────────────────────
-    while (!glfwWindowShouldClose(window))
-    {
-        float currentFrame = (float)glfwGetTime();
-        deltaTime = currentFrame - lastFrame;
-        lastFrame = currentFrame;
-
-        processInput(window);
-
-        // Clear
-        glClearColor(0.52f, 0.80f, 0.92f, 1.0f); // fallback sky color
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        // Matrices (shared)
-        glm::mat4 view = glm::lookAt(cameraPos,
-            cameraPos + cameraFront,
-            cameraUp);
-        glm::mat4 projection = glm::perspective(glm::radians(fov),
-            (float)SCR_WIDTH / (float)SCR_HEIGHT,
-            0.1f, 200.0f);
-
-        // ── Draw SKYBOX ───────────────────────────────────────────────────────
-        // We disable depth writing so the sky is always "behind" everything.
-        glDepthMask(GL_FALSE);
-        glUseProgram(texShader);
-
-        glm::mat4 skyModel = glm::mat4(1.0f);
-        // Centre the skybox on the camera so it never moves away
-        skyModel = glm::translate(skyModel, cameraPos);
-        skyModel = glm::scale(skyModel, glm::vec3(100.0f));
-
-        glUniformMatrix4fv(glGetUniformLocation(texShader, "model"), 1, GL_FALSE, glm::value_ptr(skyModel));
-        glUniformMatrix4fv(glGetUniformLocation(texShader, "view"), 1, GL_FALSE, glm::value_ptr(view));
-        glUniformMatrix4fv(glGetUniformLocation(texShader, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
-        glUniform4f(glGetUniformLocation(texShader, "colorTint"), 1, 1, 1, 1);
-
-        glBindVertexArray(skyVAO);
-        // Draw sky faces with different textures:
-        //   We stored faces as: top(6), front/back/left/right(6 each), bottom(6)
-        //   skyVertCount = 36 vertices total (6 faces × 6 verts)
-
-        // Top face  → sky texture
-        glBindTexture(GL_TEXTURE_2D, skyTex);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
-
-        // Side faces (4 × 6 = 24 verts) → mountain/horizon texture
-        glBindTexture(GL_TEXTURE_2D, mountainTex);
-        glDrawArrays(GL_TRIANGLES, 6, 24);
-
-        // Bottom face → grass (hidden underground but keeps it clean)
-        glBindTexture(GL_TEXTURE_2D, grassTex);
-        glDrawArrays(GL_TRIANGLES, 30, 6);
-
-        glDepthMask(GL_TRUE);
-
-        // ── Draw GROUND ───────────────────────────────────────────────────────
-        glm::mat4 groundModel = glm::mat4(1.0f);
-        glUniformMatrix4fv(glGetUniformLocation(texShader, "model"), 1, GL_FALSE, glm::value_ptr(groundModel));
-        glUniform4f(glGetUniformLocation(texShader, "colorTint"), 1, 1, 1, 1);
-
-        glBindTexture(GL_TEXTURE_2D, grassTex);
-        glBindVertexArray(groundVAO);
-        glDrawElements(GL_TRIANGLES, groundIndexCount, GL_UNSIGNED_INT, 0);
-
-        // ── Draw TERRAIN ──────────────────────────────────────────────────────
-        glUseProgram(terrainShader);
-        glm::mat4 terrainModel = glm::mat4(1.0f);
-        // Place terrain slightly in front of centre
-        terrainModel = glm::translate(terrainModel, glm::vec3(-7.5f, 0.0f, -7.5f));
-
-        glUniformMatrix4fv(glGetUniformLocation(terrainShader, "model"), 1, GL_FALSE, glm::value_ptr(terrainModel));
-        glUniformMatrix4fv(glGetUniformLocation(terrainShader, "view"), 1, GL_FALSE, glm::value_ptr(view));
-        glUniformMatrix4fv(glGetUniformLocation(terrainShader, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
-
-        glBindVertexArray(terrainVAO);
-        glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0);
-
-        glfwSwapBuffers(window);
-        glfwPollEvents();
+    // ── Pre-compute terrain heights ───────────────────────────────────────────
+    for (int iz = 0; iz <= GRID; iz++) {
+        for (int ix = 0; ix <= GRID; ix++) {
+            float wx = ix * CELL;
+            float wz = iz * CELL;
+            // Layered sine waves → rolling hills
+            terrainH[ix][iz] =
+                0.6f * sinf(wx * 0.8f) * cosf(wz * 0.6f)
+                + 0.3f * sinf(wx * 1.7f + 0.5f) * sinf(wz * 1.4f)
+                + 0.2f * cosf(wx * 3.1f) * sinf(wz * 2.9f + 1.0f);
+        }
     }
 
-    // ── Cleanup ───────────────────────────────────────────────────────────────
-    glDeleteVertexArrays(1, &skyVAO);
-    glDeleteBuffers(1, &skyVBO);
-    glDeleteVertexArrays(1, &groundVAO);
-    glDeleteBuffers(1, &groundVBO);
-    glDeleteBuffers(1, &groundEBO);
-    glDeleteVertexArrays(1, &terrainVAO);
-    glDeleteBuffers(1, &terrainVBO);
-    glDeleteBuffers(1, &terrainEBO);
-    glDeleteProgram(texShader);
-    glDeleteProgram(terrainShader);
-
-    glfwTerminate();
+    glutMainLoop();
     return 0;
 }
 
 // =============================================================================
-//  INPUT / CALLBACKS
+//  DISPLAY CALLBACK
 // =============================================================================
-void processInput(GLFWwindow* window)
+void display()
 {
-    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
-        glfwSetWindowShouldClose(window, true);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    float speed = 5.0f * deltaTime;
-    if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) speed *= 3.0f;
+    // ── Set up camera (View matrix) ───────────────────────────────────────────
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
 
-    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
-        cameraPos += speed * cameraFront;
-    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
-        cameraPos -= speed * cameraFront;
-    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
-        cameraPos -= glm::normalize(glm::cross(cameraFront, cameraUp)) * speed;
-    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
-        cameraPos += glm::normalize(glm::cross(cameraFront, cameraUp)) * speed;
+    // Convert yaw + pitch to a look-at target
+    float yawRad = camYaw * 3.14159f / 180.0f;
+    float pitchRad = camPitch * 3.14159f / 180.0f;
+    float dirX = sinf(yawRad) * cosf(pitchRad);
+    float dirY = sinf(pitchRad);
+    float dirZ = cosf(yawRad) * cosf(pitchRad);
 
+    gluLookAt(
+        camX, camY, camZ,                          // eye position
+        camX + dirX, camY + dirY, camZ + dirZ,     // look-at target
+        0.0f, 1.0f, 0.0f                           // up vector
+    );
+
+    // ── Draw scene elements ───────────────────────────────────────────────────
+    drawSkybox();
+    drawGround();
+    drawTerrain();
+
+    glutSwapBuffers();
+}
+
+// =============================================================================
+//  RESHAPE CALLBACK  (same pattern as Course 1 PDF)
+// =============================================================================
+void reshape(int w, int h)
+{
+    windowWidth = w;
+    windowHeight = h;
+    glViewport(0, 0, w, h);
+
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    gluPerspective(60.0, (double)w / (double)h, 0.1, 500.0);
+
+    glMatrixMode(GL_MODELVIEW);
+}
+
+// =============================================================================
+//  INPUT
+// =============================================================================
+void keyboard(unsigned char key, int x, int y)
+{
+    float speed = 0.3f;
+    float yawRad = camYaw * 3.14159f / 180.0f;
+
+    switch (key) {
+    case 'w': case 'W':
+        camX += sinf(yawRad) * speed;
+        camZ += cosf(yawRad) * speed;
+        break;
+    case 's': case 'S':
+        camX -= sinf(yawRad) * speed;
+        camZ -= cosf(yawRad) * speed;
+        break;
+    case 'a': case 'A':
+        camX -= cosf(yawRad) * speed;
+        camZ += sinf(yawRad) * speed;
+        break;
+    case 'd': case 'D':
+        camX += cosf(yawRad) * speed;
+        camZ -= sinf(yawRad) * speed;
+        break;
+    case 27: // ESC
+        glutLeaveMainLoop();
+        break;
+    }
     // Keep camera above ground
-    if (cameraPos.y < 0.5f) cameraPos.y = 0.5f;
+    if (camY < 0.5f) camY = 0.5f;
+    glutPostRedisplay();
 }
 
-void framebuffer_size_callback(GLFWwindow*, int width, int height)
+void specialKeys(int key, int x, int y)
 {
-    glViewport(0, 0, width, height);
-}
-
-void mouse_callback(GLFWwindow*, double xposIn, double yposIn)
-{
-    float xpos = (float)xposIn;
-    float ypos = (float)yposIn;
-
-    if (firstMouse) { lastX = xpos; lastY = ypos; firstMouse = false; }
-
-    float xoffset = (xpos - lastX) * 0.1f;
-    float yoffset = (lastY - ypos) * 0.1f; // reversed: y goes bottom-to-top
-    lastX = xpos; lastY = ypos;
-
-    yaw += xoffset;
-    pitch += yoffset;
-    if (pitch > 89.0f) pitch = 89.0f;
-    if (pitch < -89.0f) pitch = -89.0f;
-
-    glm::vec3 front;
-    front.x = cos(glm::radians(yaw)) * cos(glm::radians(pitch));
-    front.y = sin(glm::radians(pitch));
-    front.z = sin(glm::radians(yaw)) * cos(glm::radians(pitch));
-    cameraFront = glm::normalize(front);
-}
-
-void scroll_callback(GLFWwindow*, double, double yoffset)
-{
-    fov -= (float)yoffset;
-    if (fov < 10.0f) fov = 10.0f;
-    if (fov > 90.0f) fov = 90.0f;
-}
-
-// =============================================================================
-//  SHADER HELPERS
-// =============================================================================
-unsigned int compileShader(const char* vertSrc, const char* fragSrc)
-{
-    // Vertex shader
-    unsigned int vert = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(vert, 1, &vertSrc, nullptr);
-    glCompileShader(vert);
-    int ok; char log[512];
-    glGetShaderiv(vert, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        glGetShaderInfoLog(vert, 512, nullptr, log);
-        std::cerr << "VERTEX SHADER:\n" << log << "\n";
+    switch (key) {
+    case GLUT_KEY_LEFT:  camYaw -= 3.0f; break;
+    case GLUT_KEY_RIGHT: camYaw += 3.0f; break;
+    case GLUT_KEY_UP:    camPitch += 2.0f; break;
+    case GLUT_KEY_DOWN:  camPitch -= 2.0f; break;
     }
+    // Clamp pitch so we can't flip upside down
+    if (camPitch > 89.0f) camPitch = 89.0f;
+    if (camPitch < -89.0f) camPitch = -89.0f;
+    glutPostRedisplay();
+}
 
-    // Fragment shader
-    unsigned int frag = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(frag, 1, &fragSrc, nullptr);
-    glCompileShader(frag);
-    glGetShaderiv(frag, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        glGetShaderInfoLog(frag, 512, nullptr, log);
-        std::cerr << "FRAGMENT SHADER:\n" << log << "\n";
-    }
-
-    // Link
-    unsigned int prog = glCreateProgram();
-    glAttachShader(prog, vert);
-    glAttachShader(prog, frag);
-    glLinkProgram(prog);
-    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        glGetProgramInfoLog(prog, 512, nullptr, log);
-        std::cerr << "PROGRAM LINK:\n" << log << "\n";
-    }
-
-    glDeleteShader(vert);
-    glDeleteShader(frag);
-    return prog;
+void idle()
+{
+    glutPostRedisplay();
 }
 
 // =============================================================================
-//  PROCEDURAL TEXTURES  (generated on CPU, uploaded to GPU)
-//  No external image files required!
+//  PROCEDURAL TEXTURES
+//  All textures are generated as pixel arrays on the CPU, then uploaded to GPU.
+//  This means no image files are needed.
 // =============================================================================
 
-// Helper: upload an RGBA pixel array to a GL texture
-unsigned int uploadTexture(std::vector<unsigned char>& data, int w, int h)
+// Helper: upload an RGB pixel array and return a texture ID
+GLuint uploadTexture(std::vector<unsigned char>& pixels, int w, int h)
 {
-    unsigned int tex;
-    glGenTextures(1, &tex);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
-        GL_RGBA, GL_UNSIGNED_BYTE, data.data());
-    glGenerateMipmap(GL_TEXTURE_2D);
-    // Repeat wrapping + linear filtering
+    GLuint id;
+    glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_2D, id);
+
+    // Upload pixels to GPU
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0,
+        GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+
+    // Texture filtering and wrapping
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    return tex;
+
+    return id;
 }
 
-// Grass: dark-green/light-green checkerboard with subtle noise
-unsigned int createProceduralTexture_Grass(int w, int h)
+// ── Grass texture: natural green blotchy pattern ──────────────────────────────
+GLuint makeTexture_Grass(int w, int h)
 {
-    std::vector<unsigned char> data(w * h * 4);
+    std::vector<unsigned char> pixels(w * h * 3);
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
-            int idx = (y * w + x) * 4;
-            bool checker = ((x / 16) + (y / 16)) % 2 == 0;
-            // Add a tiny pseudo-random brightness variation
-            float noise = 0.85f + 0.15f * (float)((x * 7 + y * 13) % 17) / 16.0f;
-            unsigned char r = (unsigned char)((checker ? 34 : 50) * noise);
-            unsigned char g = (unsigned char)((checker ? 120 : 160) * noise);
-            unsigned char b = (unsigned char)((checker ? 24 : 40) * noise);
-            data[idx + 0] = r; data[idx + 1] = g;
-            data[idx + 2] = b; data[idx + 3] = 255;
+            int idx = (y * w + x) * 3;
+            // Smooth organic blotches using sine waves
+            float bx = sinf(x * 0.18f) * cosf(y * 0.22f);
+            float by = sinf(x * 0.31f + 1.1f) * sinf(y * 0.27f + 0.7f);
+            float blend = (bx + by + 2.0f) / 4.0f; // 0..1
+            // Natural grass green: medium → bright green
+            pixels[idx + 0] = (unsigned char)(40 + 20 * blend); // R – low
+            pixels[idx + 1] = (unsigned char)(110 + 50 * blend); // G – dominant
+            pixels[idx + 2] = (unsigned char)(20 + 10 * blend); // B – very low
         }
     }
-    return uploadTexture(data, w, h);
+    return uploadTexture(pixels, w, h);
 }
 
-// Sky: vertical gradient from light-cyan at top to pale-blue at horizon
-unsigned int createProceduralTexture_Sky(int w, int h)
+// 25002500 Sky texture: deep blue at top fading to light blue at horizon 25002500250025002500250025002500250025002500250025002500250025002500
+GLuint makeTexture_Sky(int w, int h)
 {
-    std::vector<unsigned char> data(w * h * 4);
-    for (int y = 0; y < h; y++) {
-        float t = (float)y / (h - 1); // 0 = top, 1 = bottom (horizon)
-        // Top: deep sky blue  →  Bottom: pale/white horizon
-        unsigned char r = (unsigned char)(100 + 155 * t);
-        unsigned char g = (unsigned char)(160 + 80 * t);
-        unsigned char b = (unsigned char)(220 + 35 * t);
-        for (int x = 0; x < w; x++) {
-            int idx = (y * w + x) * 4;
-            data[idx + 0] = r; data[idx + 1] = g; data[idx + 2] = b; data[idx + 3] = 255;
-        }
-    }
-    return uploadTexture(data, w, h);
-}
+    std::vector<unsigned char> pixels(w * h * 3);
 
-// Mountains: horizon band + mountain silhouette + sky above
-unsigned int createProceduralTexture_Mountain(int w, int h)
-{
-    std::vector<unsigned char> data(w * h * 4);
-
-    // Simple "mountain" height function using sin waves
-    auto mountainHeight = [&](float nx) -> float {
-        // nx in [0,1], returns normalized height [0,1]
+    // Simple mountain height function using overlapping sine waves
+    auto mountainHeight = [](float nx) -> float {
         float h1 = 0.35f + 0.20f * sinf(nx * 6.28f * 2.0f);
         float h2 = 0.30f + 0.15f * sinf(nx * 6.28f * 5.0f + 1.2f);
         float h3 = 0.25f + 0.10f * sinf(nx * 6.28f * 11.0f + 0.5f);
-        return (h1 + h2 + h3) / 3.0f; // average, roughly [0.2 – 0.55]
+        return (h1 + h2 + h3) / 3.0f;
         };
 
     for (int y = 0; y < h; y++) {
-        float ty = 1.0f - (float)y / (h - 1); // 0=bottom, 1=top of texture
+        float ty = 1.0f - (float)y / (h - 1); // 0=bottom, 1=top
         for (int x = 0; x < w; x++) {
             float nx = (float)x / (w - 1);
-            float mh = mountainHeight(nx);          // mountain peak height
-            int idx = (y * w + x) * 4;
+            float mh = mountainHeight(nx);
+            int idx = (y * w + x) * 3;
 
             if (ty < 0.08f) {
-                // Ground strip – dark green
-                data[idx + 0] = 30; data[idx + 1] = 100; data[idx + 2] = 20; data[idx + 3] = 255;
+                // Ground strip 2013 earthy brown (dirt)
+                pixels[idx + 0] = 101; pixels[idx + 1] = 67; pixels[idx + 2] = 33;
             }
             else if (ty < mh) {
-                // Mountain body – grey/purple
-                float fog = 1.0f - (mh - ty) / mh; // lighter near peak
-                unsigned char mr = (unsigned char)(80 + 60 * fog);
-                unsigned char mg = (unsigned char)(70 + 50 * fog);
-                unsigned char mb = (unsigned char)(90 + 70 * fog);
-                data[idx + 0] = mr; data[idx + 1] = mg; data[idx + 2] = mb; data[idx + 3] = 255;
+                // Mountain body 2013 natural grey (dark base 2192 lighter near peak)
+                float fog = 1.0f - (mh - ty) / mh;
+                pixels[idx + 0] = (unsigned char)(90 + 70 * fog);  // R grey
+                pixels[idx + 1] = (unsigned char)(90 + 70 * fog);  // G grey
+                pixels[idx + 2] = (unsigned char)(95 + 75 * fog);  // B slight blue tint at peak
             }
             else {
-                // Sky gradient above mountains
+                // Sky above mountains 2013 matches sky texture (deep blue 2192 light blue)
                 float skyT = (ty - mh) / (1.0f - mh);
-                unsigned char r = (unsigned char)(200 - 100 * skyT);
-                unsigned char g = (unsigned char)(220 - 60 * skyT);
-                unsigned char b = (unsigned char)(240 - 20 * skyT);
-                data[idx + 0] = r; data[idx + 1] = g; data[idx + 2] = b; data[idx + 3] = 255;
+                pixels[idx + 0] = (unsigned char)(30 + 150 * (1.0f - skyT));
+                pixels[idx + 1] = (unsigned char)(100 + 120 * (1.0f - skyT));
+                pixels[idx + 2] = (unsigned char)(200 + 55 * (1.0f - skyT));
             }
         }
     }
-    return uploadTexture(data, w, h);
+    return uploadTexture(pixels, w, h);
+}
+
+// ── Mountain texture: sky gradient + mountain silhouette + ground strip ───────
+GLuint makeTexture_Mountain(int w, int h)
+{
+    std::vector<unsigned char> pixels(w * h * 3);
+    for (int y = 0; y < h; y++) {
+        float t = (float)y / (h - 1); // 0=top, 1=bottom(horizon)
+        unsigned char r = (unsigned char)(30 + 150 * t);
+        unsigned char g = (unsigned char)(100 + 120 * t);
+        unsigned char b = (unsigned char)(200 + 55 * t);
+        for (int x = 0; x < w; x++) {
+            int idx = (y * w + x) * 3;
+            pixels[idx + 0] = r; pixels[idx + 1] = g; pixels[idx + 2] = b;
+        }
+    }
+    return uploadTexture(pixels, w, h);
 }
 
 // =============================================================================
-//  MESH BUILDERS
+//  DRAWING FUNCTIONS
 // =============================================================================
 
 // ── SKYBOX ────────────────────────────────────────────────────────────────────
-// A unit cube (centred at origin) with inward-facing normals.
-// Layout per vertex: x y z  u v  (5 floats)
-// Face order: top(0–5), front(6–11), back(12–17), left(18–23), right(24–29), bottom(30–35)
-void buildSkyboxMesh(unsigned int& VAO, unsigned int& VBO, int& vertCount)
+// A large cube centred on the camera. We disable depth writes so it is always
+// drawn "behind" all other geometry.
+void drawSkybox()
 {
-    // Each face is 2 triangles = 6 vertices
-    // Note: UVs are written so the texture appears "right side up" inside the cube
-    float verts[] = {
-        // ── TOP (sky) ──────────────────────────────────────────────
-        -1, 1,-1,  0,1,   1, 1,-1,  1,1,   1, 1, 1,  1,0,
-         1, 1, 1,  1,0,  -1, 1, 1,  0,0,  -1, 1,-1,  0,1,
-         // ── FRONT (south wall, mountain) ──────────────────────────
-         -1,-1, 1,  0,0,   1,-1, 1,  1,0,   1, 1, 1,  1,1,
-          1, 1, 1,  1,1,  -1, 1, 1,  0,1,  -1,-1, 1,  0,0,
-          // ── BACK ──────────────────────────────────────────────────
-           1,-1,-1,  0,0,  -1,-1,-1,  1,0,  -1, 1,-1,  1,1,
-          -1, 1,-1,  1,1,   1, 1,-1,  0,1,   1,-1,-1,  0,0,
-          // ── LEFT ──────────────────────────────────────────────────
-          -1,-1,-1,  0,0,  -1,-1, 1,  1,0,  -1, 1, 1,  1,1,
-          -1, 1, 1,  1,1,  -1, 1,-1,  0,1,  -1,-1,-1,  0,0,
-          // ── RIGHT ─────────────────────────────────────────────────
-           1,-1, 1,  0,0,   1,-1,-1,  1,0,   1, 1,-1,  1,1,
-           1, 1,-1,  1,1,   1, 1, 1,  0,1,   1,-1, 1,  0,0,
-           // ── BOTTOM (ground/grass) ─────────────────────────────────
-           -1,-1,-1,  0,1,   1,-1,-1,  1,1,   1,-1, 1,  1,0,
-            1,-1, 1,  1,0,  -1,-1, 1,  0,0,  -1,-1,-1,  0,1,
-    };
-    vertCount = 36;
+    float s = 200.0f; // half-size of the skybox
 
-    glGenVertexArrays(1, &VAO);
-    glGenBuffers(1, &VBO);
-    glBindVertexArray(VAO);
-    glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+    // Reset vertex color to white so textures show their true colors
+    // (terrain uses glColor3f which would otherwise tint the skybox)
+    glColor3f(1.0f, 1.0f, 1.0f);
 
-    // Position (location 0)
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    // UV (location 1)
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float),
-        (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
+    // Centre the box on the camera every frame
+    glPushMatrix();
+    glTranslatef(camX, camY, camZ);
 
-    glBindVertexArray(0);
+    // Disable depth writing – skybox is always "behind" everything
+    glDepthMask(GL_FALSE);
+    glDisable(GL_DEPTH_TEST);
+
+    // ── TOP FACE – sky texture ────────────────────────────────────────────────
+    glBindTexture(GL_TEXTURE_2D, texSky);
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 0); glVertex3f(-s, s, -s);
+    glTexCoord2f(1, 0); glVertex3f(s, s, -s);
+    glTexCoord2f(1, 1); glVertex3f(s, s, s);
+    glTexCoord2f(0, 1); glVertex3f(-s, s, s);
+    glEnd();
+
+    // ── BOTTOM FACE – grass texture ───────────────────────────────────────────
+    glBindTexture(GL_TEXTURE_2D, texGrass);
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 0); glVertex3f(-s, -s, s);
+    glTexCoord2f(1, 0); glVertex3f(s, -s, s);
+    glTexCoord2f(1, 1); glVertex3f(s, -s, -s);
+    glTexCoord2f(0, 1); glVertex3f(-s, -s, -s);
+    glEnd();
+
+    // ── SIDE FACES – mountain/horizon texture ─────────────────────────────────
+    // UV: U goes left to right, V=0 at bottom of wall (ground), V=1 at top (sky)
+    glBindTexture(GL_TEXTURE_2D, texMountain);
+
+    // Front face (south)
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 0); glVertex3f(-s, -s, s);  // bottom-left  V=0 (ground)
+    glTexCoord2f(1, 0); glVertex3f(s, -s, s);  // bottom-right V=0 (ground)
+    glTexCoord2f(1, 1); glVertex3f(s, s, s);  // top-right    V=1 (sky)
+    glTexCoord2f(0, 1); glVertex3f(-s, s, s);  // top-left     V=1 (sky)
+    glEnd();
+
+    // Back face (north)
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 0); glVertex3f(s, -s, -s);
+    glTexCoord2f(1, 0); glVertex3f(-s, -s, -s);
+    glTexCoord2f(1, 1); glVertex3f(-s, s, -s);
+    glTexCoord2f(0, 1); glVertex3f(s, s, -s);
+    glEnd();
+
+    // Left face (west)
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 0); glVertex3f(-s, -s, -s);
+    glTexCoord2f(1, 0); glVertex3f(-s, -s, s);
+    glTexCoord2f(1, 1); glVertex3f(-s, s, s);
+    glTexCoord2f(0, 1); glVertex3f(-s, s, -s);
+    glEnd();
+
+    // Right face (east)
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 0); glVertex3f(s, -s, s);
+    glTexCoord2f(1, 0); glVertex3f(s, -s, -s);
+    glTexCoord2f(1, 1); glVertex3f(s, s, -s);
+    glTexCoord2f(0, 1); glVertex3f(s, s, s);
+    glEnd();
+
+    // Re-enable depth for the rest of the scene
+    glDepthMask(GL_TRUE);
+    glEnable(GL_DEPTH_TEST);
+
+    glPopMatrix();
+
+    // Reset color to white for subsequent textured draws
+    glColor3f(1.0f, 1.0f, 1.0f);
 }
 
 // ── GROUND PLANE ──────────────────────────────────────────────────────────────
-// A large flat quad (Y = 0) tiled with the grass texture.
-void buildGroundMesh(unsigned int& VAO, unsigned int& VBO, unsigned int& EBO,
-    int& indexCount)
+// A large flat quad at Y=0, tiled with the grass texture.
+void drawGround()
 {
-    float half = 50.0f;   // extends ±50 units
-    float tile = 20.0f;  // UV tiles so the grass pattern repeats nicely
+    float half = 50.0f;  // extends ±50 units from centre
+    float tile = 20.0f;  // UV repeats 20× so the grass pattern tiles nicely
 
-    float verts[] = {
-        // x       y    z       u      v
-        -half,  0.0f, -half,  0.0f,   tile,
-         half,  0.0f, -half,  tile,   tile,
-         half,  0.0f,  half,  tile,   0.0f,
-        -half,  0.0f,  half,  0.0f,   0.0f,
-    };
-    unsigned int indices[] = { 0,1,2,  2,3,0 };
-    indexCount = 6;
-
-    glGenVertexArrays(1, &VAO);
-    glGenBuffers(1, &VBO);
-    glGenBuffers(1, &EBO);
-
-    glBindVertexArray(VAO);
-    glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
-
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float),
-        (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-
-    glBindVertexArray(0);
+    glColor3f(1.0f, 1.0f, 1.0f); // reset color so texture shows correctly
+    glBindTexture(GL_TEXTURE_2D, texGrass);
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, tile); glVertex3f(-half, 0.0f, -half);
+    glTexCoord2f(tile, tile); glVertex3f(half, 0.0f, -half);
+    glTexCoord2f(tile, 0); glVertex3f(half, 0.0f, half);
+    glTexCoord2f(0, 0); glVertex3f(-half, 0.0f, half);
+    glEnd();
 }
 
-// ── TERRAIN GRID ──────────────────────────────────────────────────────────────
-// Generates a gridX × gridZ quad mesh with sine-wave height variation.
-// Vertices are colored green→brown based on height (low=green, high=brown/snow).
-void buildTerrainMesh(unsigned int& VAO, unsigned int& VBO, unsigned int& EBO,
-    int& indexCount, int gridX, int gridZ)
+// ── TERRAIN ───────────────────────────────────────────────────────────────────
+// A 30×30 grid of quads with sine-wave height variation.
+// Each vertex is colored green→brown based on its height.
+void drawTerrain()
 {
-    std::vector<float>        vertices;
-    std::vector<unsigned int> indices;
+    // Place the terrain slightly offset from centre so it sits in the scene
+    glPushMatrix();
+    glTranslatef(-7.5f, 0.0f, -7.5f);
 
-    float cellSize = 0.5f;  // world-space size of each grid cell
+    // Disable texturing for this mesh – we use vertex colors instead
+    glDisable(GL_TEXTURE_2D);
 
-    auto heightAt = [](float x, float z) -> float {
-        // Layered sine waves produce rolling hills
-        return  0.6f * sinf(x * 0.8f) * cosf(z * 0.6f)
-            + 0.3f * sinf(x * 1.7f + 0.5f) * sinf(z * 1.4f)
-            + 0.2f * cosf(x * 3.1f) * sinf(z * 2.9f + 1.0f);
-        };
+    for (int iz = 0; iz < GRID; iz++) {
+        for (int ix = 0; ix < GRID; ix++) {
 
-    // Build vertices
-    for (int iz = 0; iz <= gridZ; iz++) {
-        for (int ix = 0; ix <= gridX; ix++) {
-            float wx = ix * cellSize;
-            float wz = iz * cellSize;
-            float wy = heightAt(wx, wz);
+            // Heights of the four corners of this quad
+            float h00 = terrainH[ix][iz];
+            float h10 = terrainH[ix + 1][iz];
+            float h01 = terrainH[ix][iz + 1];
+            float h11 = terrainH[ix + 1][iz + 1];
 
-            // Color based on height: low=dark green, mid=light green, high=brown
-            float t = (wy + 0.8f) / 1.6f; // normalise roughly to [0,1]
-            t = std::max(0.0f, std::min(1.0f, t));
-            float r, g, b;
-            if (t < 0.5f) {
-                // dark green → light green
-                float s = t / 0.5f;
-                r = 0.10f + 0.10f * s;
-                g = 0.40f + 0.20f * s;
-                b = 0.05f;
-            }
-            else {
-                // light green → sandy brown
-                float s = (t - 0.5f) / 0.5f;
-                r = 0.20f + 0.45f * s;
-                g = 0.60f - 0.20f * s;
-                b = 0.05f + 0.10f * s;
-            }
+            // World positions
+            float x0 = ix * CELL, x1 = (ix + 1) * CELL;
+            float z0 = iz * CELL, z1 = (iz + 1) * CELL;
 
-            // Position (x, y, z)
-            vertices.push_back(wx);
-            vertices.push_back(wy);
-            vertices.push_back(wz);
-            // Color (r, g, b)
-            vertices.push_back(r);
-            vertices.push_back(g);
-            vertices.push_back(b);
-        }
-    }
+            // Color by height:
+            //   low  (valleys) → brown dirt   (0.40, 0.26, 0.13)
+            //   mid  (slopes)  → grass green  (0.13, 0.55, 0.13)
+            //   high (peaks)   → rocky grey   (0.55, 0.55, 0.55)
+            auto heightColor = [](float h) {
+                float t = (h + 0.8f) / 1.6f; // normalise to [0,1]
+                if (t < 0.0f) t = 0.0f;
+                if (t > 1.0f) t = 1.0f;
+                if (t < 0.4f) {
+                    // brown dirt at low points
+                    float s = t / 0.4f;
+                    glColor3f(0.40f - 0.05f * s, 0.26f + 0.10f * s, 0.13f);
+                }
+                else if (t < 0.7f) {
+                    // grass green on mid slopes
+                    float s = (t - 0.4f) / 0.3f;
+                    glColor3f(0.13f + 0.10f * s, 0.55f - 0.05f * s, 0.08f);
+                }
+                else {
+                    // rocky grey at peaks
+                    float s = (t - 0.7f) / 0.3f;
+                    glColor3f(0.23f + 0.32f * s, 0.50f + 0.05f * s, 0.08f + 0.12f * s);
+                }
+                };
 
-    // Build indices (two triangles per quad)
-    for (int iz = 0; iz < gridZ; iz++) {
-        for (int ix = 0; ix < gridX; ix++) {
-            unsigned int tl = iz * (gridX + 1) + ix;
-            unsigned int tr = tl + 1;
-            unsigned int bl = tl + (gridX + 1);
-            unsigned int br = bl + 1;
+            // Draw as two triangles (same as GL_QUADS but explicit)
+            glBegin(GL_TRIANGLES);
             // Triangle 1
-            indices.push_back(tl); indices.push_back(bl); indices.push_back(tr);
+            heightColor(h00); glVertex3f(x0, h00, z0);
+            heightColor(h10); glVertex3f(x1, h10, z0);
+            heightColor(h01); glVertex3f(x0, h01, z1);
             // Triangle 2
-            indices.push_back(tr); indices.push_back(bl); indices.push_back(br);
+            heightColor(h10); glVertex3f(x1, h10, z0);
+            heightColor(h11); glVertex3f(x1, h11, z1);
+            heightColor(h01); glVertex3f(x0, h01, z1);
+            glEnd();
         }
     }
-    indexCount = (int)indices.size();
 
-    glGenVertexArrays(1, &VAO);
-    glGenBuffers(1, &VBO);
-    glGenBuffers(1, &EBO);
-
-    glBindVertexArray(VAO);
-    glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferData(GL_ARRAY_BUFFER,
-        vertices.size() * sizeof(float),
-        vertices.data(), GL_STATIC_DRAW);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-        indices.size() * sizeof(unsigned int),
-        indices.data(), GL_STATIC_DRAW);
-
-    // Position (location 0) – 3 floats
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    // Color (location 1) – 3 floats
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
-        (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-
-    glBindVertexArray(0);
+    // Re-enable texturing for anything drawn after terrain
+    glEnable(GL_TEXTURE_2D);
+    glPopMatrix();
 }
