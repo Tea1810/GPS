@@ -2,6 +2,8 @@
 #include <cmath>
 #include <vector>
 
+using namespace std;
+
 // Camera state
 static float camX = 0.0f, camY = 2.0f, camZ = 10.0f;
 static float camYaw = 180.0f, camPitch = -10.0f;
@@ -15,7 +17,7 @@ const float TRACK_OUTER_B = 16.0f;  // outer ellipse Z radius
 const float TRACK_INNER_A = 15.0f;  // inner ellipse X radius
 const float TRACK_INNER_B =  9.0f;  // inner ellipse Z radius
 
-GLuint uploadTexture(std::vector<unsigned char>& pixels, int w, int h)
+GLuint uploadTexture(vector<unsigned char>& pixels, int w, int h)
 {
     GLuint id;
     glGenTextures(1, &id);
@@ -31,7 +33,7 @@ GLuint uploadTexture(std::vector<unsigned char>& pixels, int w, int h)
 // Blotchy green pattern using sine waves
 GLuint makeTexture_Grass(int w, int h)
 {
-    std::vector<unsigned char> pixels(w * h * 3);
+    vector<unsigned char> pixels(w * h * 3);
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
             int idx = (y * w + x) * 3;
@@ -49,7 +51,7 @@ GLuint makeTexture_Grass(int w, int h)
 // Brown ground strip at the bottom, blue mountain silhouette, grey sky above
 GLuint makeTexture_Horizon(int w, int h)
 {
-    std::vector<unsigned char> pixels(w * h * 3);
+    vector<unsigned char> pixels(w * h * 3);
 
     auto mountainHeight = [](float nx) -> float {
         float h1 = 0.35f + 0.20f * sinf(nx * 6.28f * 2.0f);
@@ -88,7 +90,7 @@ GLuint makeTexture_Horizon(int w, int h)
 // 0 = inner edge, 1 = outer edge.
 GLuint makeTexture_Asphalt(int w, int h)
 {
-    std::vector<unsigned char> pixels(w * h * 3);
+    vector<unsigned char> pixels(w * h * 3);
     for (int y = 0; y < h; y++) {
         float fv = (float)y / (h - 1);   
         for (int x = 0; x < w; x++) {
